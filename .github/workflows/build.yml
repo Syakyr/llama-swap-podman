@@ -1,0 +1,152 @@
+name: build
+
+# Builds the wrapped llama-swap + podman-remote image and publishes it to GHCR.
+#
+# Provenance tag scheme (mirrors halogen-timings-sidecar):
+#   push tag  v<llama-swap>-podman<N>   e.g. v256-podman1
+#     -> ghcr.io/<owner>/<repo>:v256-podman1   (immutable build record)
+#     -> ghcr.io/<owner>/<repo>:v256          (latest podman build of that version)
+#     -> ghcr.io/<owner>/<repo>:latest        (only when v256 is the newest upstream release)
+#
+# The exact base image is resolved at build time to the newest immutable
+# v<ver>-cpu-b<build> tag via scripts/resolve_base.py (uv), so the floating
+# `cpu` tag is never baked in blindly. The resolved base is recorded in the
+# job summary.
+
+on:
+  push:
+    tags: ["v[p0-9]*-podman[0-9]*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      llama_swap_version:
+        description: "Upstream llama-swap version (e.g. v256)"
+        required: true
+      podman_version:
+        description: "Podman version for the baked-in remote CLI (e.g. 6.1.2)"
+        required: true
+        default: "6.1.2"
+      podman_build_number:
+        description: "Our build number for that llama-swap version"
+        required: true
+        default: "1"
+      base_tag:
+        description: "Optional exact base tag override (skips GHCR resolution), e.g. v256-cpu-b11011"
+        required: false
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Resolve versions
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.llama_swap_version }}"
+            N="${{ inputs.podman_build_number }}"
+            PODMAN="${{ inputs.podman_version }}"
+            BASE_OVERRIDE="${{ inputs.base_tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VER="${TAG%%-podman*}"
+            N="${TAG##*-podman}"
+            PODMAN="6.1.2"
+            BASE_OVERRIDE=""
+          fi
+          VER="v${VER#v}"   # normalize to vNNN
+
+          if [ -n "$BASE_OVERRIDE" ]; then
+            BASE="$BASE_OVERRIDE"
+          else
+            BASE="$(uv run scripts/resolve_base.py "$VER")"
+          fi
+
+          # Is this the newest upstream llama-swap release? Authenticated call:
+          # anonymous api.github.com quota is shared and routinely 403s from
+          # GitHub-hosted runners (lesson carried over from halogen watch).
+          LATEST_UPSTREAM="$(
+            curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/Mostlygeek/llama-swap/releases/latest \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))'
+          )"
+          IS_LATEST=no
+          [ "${VER#v}" = "$LATEST_UPSTREAM" ] && IS_LATEST=yes
+
+          # GHCR namespaces must be lowercase; github.repository keeps display case.
+          IMAGE="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "llama_swap=$VER"
+            echo "build_number=$N"
+            echo "podman=$PODMAN"
+            echo "base=$BASE"
+            echo "is_latest=$IS_LATEST"
+            echo "image=$IMAGE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${IMAGE}:${VER}-podman${N} from ghcr.io/mostlygeek/llama-swap:${BASE} (podman ${PODMAN}, latest=${IS_LATEST})"
+          echo "### Image plan" >> "$GITHUB_STEP_SUMMARY"
+          echo "- base: \`ghcr.io/mostlygeek/llama-swap:${BASE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- podman-remote: \`${PODMAN}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tags: \`${VER}-podman${N}\`, \`${VER}\`$( [ "$IS_LATEST" = yes ] && echo ", \`latest\`" )" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Smoke build (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          build-args: |
+            LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:${{ steps.ver.outputs.base }}
+            PODMAN_VERSION=${{ steps.ver.outputs.podman }}
+          tags: llama-swap-podman:smoke
+          cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
+          cache-to: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }},mode=max
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          echo "podman-remote in the image:"
+          docker run --rm --entrypoint podman llama-swap-podman:smoke version --client
+          echo "llama-swap binary responds to --help:"
+          docker run --rm --entrypoint /app/llama-swap llama-swap-podman:smoke --help 2>&1 | grep -qi usage
+          echo "base entrypoint preserved:"
+          docker inspect --format '{{.Config.Entrypoint}}' llama-swap-podman:smoke | grep -q '/app/llama-swap'
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:${{ steps.ver.outputs.base }}
+            PODMAN_VERSION=${{ steps.ver.outputs.podman }}
+          tags: |
+            ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}-podman${{ steps.ver.outputs.build_number }}
+            ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}
+            ${{ steps.ver.outputs.is_latest == 'yes' && format('ghcr.io/{0}:latest', steps.ver.outputs.image) || '' }}
+          cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
+          cache-to: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }},mode=max

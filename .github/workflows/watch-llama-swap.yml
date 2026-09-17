@@ -1,0 +1,165 @@
+name: watch-llama-swap
+
+# Watches Mostlygeek/llama-swap for new releases and auto-tags
+# <version>-podman<N> as the provenance record, then triggers build.yml.
+#
+# Carried-over lessons from halogen-timings-sidecar's watch workflow:
+#  1. Call api.github.com AUTHENTICATED (GITHUB_TOKEN). Anonymous calls from
+#     GitHub-hosted runners share one tiny quota and routinely 403.
+#  2. A tag pushed with GITHUB_TOKEN does NOT trigger build.yml (docs: with
+#     the exception of workflow_dispatch/repository_dispatch, other
+#     GITHUB_TOKEN-triggered events create no runs). So we push the tag for
+#     the record AND call workflow_dispatch explicitly.
+#
+# The default PODMAN_VERSION here is what scheduled builds bake in; for a
+# specific podman version, run build.yml manually.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      llama_swap_version:
+        description: "Upstream llama-swap version (blank = newest release)"
+        required: false
+        default: ""
+      podman_build_number:
+        description: "Our build number for that llama-swap version"
+        required: false
+        default: "1"
+
+permissions:
+  contents: write # push the provenance tag
+  actions: write  # POST workflow_dispatch to build.yml
+
+env:
+  UPSTREAM: Mostlygeek/llama-swap
+  PODMAN_VERSION: "6.1.2"
+
+jobs:
+  tag-new-upstream:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_VERSION: ${{ inputs.llama_swap_version }}
+      INPUT_BUILD: ${{ inputs.podman_build_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve upstream llama-swap version
+        id: ver
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-}"
+          if [ -n "$VERSION" ]; then
+            echo "using manually requested llama-swap version ${VERSION}"
+          else
+            body="$(mktemp)"
+            code="$(
+              curl -sS --retry 3 --retry-all-errors \
+                -o "$body" -w '%{http_code}' \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${UPSTREAM}/releases/latest"
+            )"
+            if [ "$code" != "200" ]; then
+              echo "::error::upstream release lookup returned HTTP ${code}"
+              head -c 800 "$body" || true
+              exit 1
+            fi
+            VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$body")"
+            echo "newest upstream llama-swap: ${VERSION}"
+          fi
+          VERSION="v${VERSION#v}"
+          N="${INPUT_BUILD:-1}"
+          {
+            echo "version=${VERSION}"
+            echo "build=${N}"
+            echo "tag=${VERSION}-podman${N}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check tag and image state
+        id: state
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            tag_exists=yes
+          else
+            tag_exists=no
+          fi
+
+          # A git tag is not proof of a build. Probe GHCR for the exact
+          # immutable tag so a version that was tagged but never built (or
+          # whose build failed) gets rebuilt on the next tick instead of
+          # being silently skipped forever. Anonymous pull token suffices.
+          IMAGE="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          PULL_TOKEN="$(
+            curl -sS --retry 3 --retry-all-errors \
+              "https://ghcr.io/token?scope=repository:${IMAGE}:pull" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))'
+          )"
+          if [ -z "$PULL_TOKEN" ]; then
+            echo "::error::could not obtain an anonymous GHCR pull token"
+            exit 1
+          fi
+          code="$(
+            curl -sS --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${PULL_TOKEN}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+              "https://ghcr.io/v2/${IMAGE}/manifests/${TAG}"
+          )"
+          case "$code" in
+            200) image_exists=yes ;;
+            404) image_exists=no ;;
+            *)
+              echo "::error::GHCR manifest probe returned HTTP ${code}; refusing to guess"
+              exit 1
+              ;;
+          esac
+          echo "tag_exists=${tag_exists}" >> "$GITHUB_OUTPUT"
+          echo "image_exists=${image_exists}" >> "$GITHUB_OUTPUT"
+          echo "${TAG}: git tag=${tag_exists}, ghcr image=${image_exists}"
+
+      - name: Push provenance tag
+        if: steps.state.outputs.tag_exists == 'no'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "pushed ${TAG}"
+
+      # Skip only when a scheduled run finds the tag AND its image already
+      # published. A manual run always rebuilds: asking for it is the intent.
+      - name: Trigger build.yml
+        if: >
+          github.event_name != 'schedule' ||
+          steps.state.outputs.image_exists == 'no'
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          code="$(
+            curl -sS --retry 3 --retry-all-errors \
+              -o "$body" -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
+              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${PODMAN_VERSION}\",\"podman_build_number\":\"${{ steps.ver.outputs.build }}\"}}"
+          )"
+          if [ "$code" != "204" ]; then
+            echo "::error::workflow_dispatch returned HTTP ${code}"
+            head -c 800 "$body" || true
+            exit 1
+          fi
+          echo "dispatched build.yml for ${{ steps.ver.outputs.tag }}"
+
+      - name: Nothing to do
+        if: >
+          github.event_name == 'schedule' &&
+          steps.state.outputs.image_exists == 'yes'
+        run: echo "${{ steps.ver.outputs.tag }} is already built; nothing to do"

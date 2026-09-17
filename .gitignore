@@ -1,0 +1,6 @@
+# runtime data / local config, not source
+llama-swap-data/
+config.yaml
+*.log
+__pycache__/
+.uv-cache/
