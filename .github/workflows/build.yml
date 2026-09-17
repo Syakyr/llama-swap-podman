@@ -50,6 +50,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          cache-dependency-glob: scripts/**
 
       - name: Resolve versions
         id: ver
@@ -121,7 +122,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "podman-remote in the image:"
-          docker run --rm --entrypoint podman llama-swap-podman:smoke version --client
+          # NB: `podman version --client` is a docker-ism; podman has no such
+          # flag (verified: exit 125, "unknown flag: --client"). --version
+          # prints the client version without needing a daemon.
+          docker run --rm --entrypoint podman llama-swap-podman:smoke --version
           echo "llama-swap binary responds to --help:"
           docker run --rm --entrypoint /app/llama-swap llama-swap-podman:smoke --help 2>&1 | grep -qi usage
           echo "base entrypoint preserved:"
