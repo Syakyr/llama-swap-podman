@@ -2,11 +2,11 @@ name: build
 
 # Builds the wrapped llama-swap + podman-remote image and publishes it to GHCR.
 #
-# Provenance tag scheme (mirrors halogen-timings-sidecar):
-#   push tag  v<llama-swap>-podman<N>   e.g. v256-podman1
-#     -> ghcr.io/<owner>/<repo>:v256-podman1   (immutable build record)
-#     -> ghcr.io/<owner>/<repo>:v256          (latest podman build of that version)
-#     -> ghcr.io/<owner>/<repo>:latest        (only when v256 is the newest upstream release)
+# Provenance tag scheme: the tag encodes BOTH upstream versions.
+#   push tag  v<llama-swap>-podman<X.Y.Z>   e.g. v256-podman6.1.2
+#     -> ghcr.io/<owner>/<repo>:v256-podman6.1.2   (immutable build record)
+#     -> ghcr.io/<owner>/<repo>:v256               (latest build of that version)
+#     -> ghcr.io/<owner>/<repo>:latest             (only when v256 is the newest upstream release)
 #
 # The exact base image is resolved at build time to the newest immutable
 # v<ver>-cpu-b<build> tag via scripts/resolve_base.py (uv), so the floating
@@ -26,10 +26,6 @@ on:
         description: "Podman version for the baked-in remote CLI (e.g. 6.1.2)"
         required: true
         default: "6.1.2"
-      podman_build_number:
-        description: "Our build number for that llama-swap version"
-        required: true
-        default: "1"
       base_tag:
         description: "Optional exact base tag override (skips GHCR resolution), e.g. v256-cpu-b11011"
         required: false
@@ -58,17 +54,22 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VER="${{ inputs.llama_swap_version }}"
-            N="${{ inputs.podman_build_number }}"
             PODMAN="${{ inputs.podman_version }}"
             BASE_OVERRIDE="${{ inputs.base_tag }}"
           else
             TAG="${GITHUB_REF_NAME}"
             VER="${TAG%%-podman*}"
-            N="${TAG##*-podman}"
-            PODMAN="6.1.2"
+            PODMAN="${TAG##*-podman}"
             BASE_OVERRIDE=""
           fi
           VER="v${VER#v}"   # normalize to vNNN
+
+          # The podman part of the tag must be a real X.Y.Z version; refuse
+          # anything else rather than bake a typo into a published tag.
+          if ! printf '%s' "$PODMAN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::podman version '${PODMAN}' is not X.Y.Z"
+            exit 1
+          fi
 
           if [ -n "$BASE_OVERRIDE" ]; then
             BASE="$BASE_OVERRIDE"
@@ -91,17 +92,16 @@ jobs:
           IMAGE="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "llama_swap=$VER"
-            echo "build_number=$N"
             echo "podman=$PODMAN"
             echo "base=$BASE"
             echo "is_latest=$IS_LATEST"
             echo "image=$IMAGE"
           } >> "$GITHUB_OUTPUT"
-          echo "Building ${IMAGE}:${VER}-podman${N} from ghcr.io/mostlygeek/llama-swap:${BASE} (podman ${PODMAN}, latest=${IS_LATEST})"
+          echo "Building ${IMAGE}:${VER}-podman${PODMAN} from ghcr.io/mostlygeek/llama-swap:${BASE} (latest=${IS_LATEST})"
           echo "### Image plan" >> "$GITHUB_STEP_SUMMARY"
           echo "- base: \`ghcr.io/mostlygeek/llama-swap:${BASE}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- podman-remote: \`${PODMAN}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- tags: \`${VER}-podman${N}\`, \`${VER}\`$( [ "$IS_LATEST" = yes ] && echo ", \`latest\`" )" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tags: \`${VER}-podman${PODMAN}\`, \`${VER}\`$( [ "$IS_LATEST" = yes ] && echo ", \`latest\`" )" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -149,7 +149,7 @@ jobs:
             LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:${{ steps.ver.outputs.base }}
             PODMAN_VERSION=${{ steps.ver.outputs.podman }}
           tags: |
-            ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}-podman${{ steps.ver.outputs.build_number }}
+            ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}-podman${{ steps.ver.outputs.podman }}
             ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}
             ${{ steps.ver.outputs.is_latest == 'yes' && format('ghcr.io/{0}:latest', steps.ver.outputs.image) || '' }}
           cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}

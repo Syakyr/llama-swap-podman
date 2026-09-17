@@ -1,7 +1,8 @@
 name: watch-llama-swap
 
 # Watches Mostlygeek/llama-swap for new releases and auto-tags
-# <version>-podman<N> as the provenance record, then triggers build.yml.
+# <version>-podman<X.Y.Z> as the provenance record (the podman version is
+# the PODMAN_VERSION env below), then triggers build.yml.
 #
 # Carried-over lessons from halogen-timings-sidecar's watch workflow:
 #  1. Call api.github.com AUTHENTICATED (GITHUB_TOKEN). Anonymous calls from
@@ -23,10 +24,6 @@ on:
         description: "Upstream llama-swap version (blank = newest release)"
         required: false
         default: ""
-      podman_build_number:
-        description: "Our build number for that llama-swap version"
-        required: false
-        default: "1"
 
 permissions:
   contents: write # push the provenance tag
@@ -42,7 +39,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       INPUT_VERSION: ${{ inputs.llama_swap_version }}
-      INPUT_BUILD: ${{ inputs.podman_build_number }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,11 +69,9 @@ jobs:
             echo "newest upstream llama-swap: ${VERSION}"
           fi
           VERSION="v${VERSION#v}"
-          N="${INPUT_BUILD:-1}"
           {
             echo "version=${VERSION}"
-            echo "build=${N}"
-            echo "tag=${VERSION}-podman${N}"
+            echo "tag=${VERSION}-podman${PODMAN_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check tag and image state
@@ -149,7 +143,7 @@ jobs:
               -H "Authorization: Bearer ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${PODMAN_VERSION}\",\"podman_build_number\":\"${{ steps.ver.outputs.build }}\"}}"
+              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${PODMAN_VERSION}\"}}"
           )"
           if [ "$code" != "204" ]; then
             echo "::error::workflow_dispatch returned HTTP ${code}"

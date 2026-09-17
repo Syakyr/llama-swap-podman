@@ -78,7 +78,7 @@ release now, or pin an exact one.
 
 ```bash
 # same thing from the CLI
-gh workflow run watch-llama-swap.yml -f llama_swap_version=v256 -f podman_build_number=1
+gh workflow run watch-llama-swap.yml -f llama_swap_version=v256
 ```
 
 Note that the watcher triggers `build.yml` with an explicit
@@ -93,7 +93,11 @@ is kept purely as provenance.
 |---|---|
 | `latest` | newest llama-swap version with a built image |
 | `v<NNN>` | latest build for that llama-swap version (moves on rebuild) |
-| `v<NNN>-podman<N>` | immutable build N — pin this for reproducibility |
+| `v<NNN>-podman<X.Y.Z>` | immutable pairing of llama-swap `v<NNN>` with podman-remote `X.Y.Z` — pin this for reproducibility |
+
+The tag encodes both upstream versions: `v256-podman6.1.2` is exactly
+llama-swap v256 wrapped with podman-remote 6.1.2. Bumping the podman side
+is just a different tag: `v256-podman7.0.0`.
 
 <details>
 <summary>List available tags without pulling</summary>
@@ -136,14 +140,18 @@ Then run it exactly as in the Quick start, swapping the image name.
 ## Releasing a change
 
 ```bash
-git tag v256-podman2 && git push origin v256-podman2
+git tag v256-podman6.1.2 && git push origin v256-podman6.1.2
 # → build.yml smoke-tests the image, then publishes
-#   :v256-podman2 (immutable) and moves :v256 to it
+#   :v256-podman6.1.2 (immutable) and moves :v256 to it
 ```
 
 `workflow_dispatch` on `build.yml` does the same interactively (with
-explicit version inputs). The `watch-llama-swap` workflow only ever
-creates `podman1` tags automatically.
+explicit `llama_swap_version` / `podman_version` inputs). The
+`watch-llama-swap` workflow builds whatever `PODMAN_VERSION` is set to in
+that file — bump it there when you want scheduled builds to pick up a new
+podman release. Re-publishing an identical `v<NNN>-podman<X.Y.Z>` pairing
+overwrites that GHCR tag, so cut a new podman patch (or use `base_tag`
+overrides in a dispatch) when you need a distinct immutable record.
 
 ## Related
 
