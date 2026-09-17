@@ -129,7 +129,18 @@ uv run scripts/resolve_base.py v256
 ```
 
 `build.yml` accepts a `base_tag` input to override the resolution with an
-exact base if you need to rebuild against a specific upstream build.
+exact base if you need to rebuild against a specific upstream build — and
+the watcher uses exactly that: it resolves the base once per tick and
+passes it into the dispatch, so the base recorded by the watcher is
+byte-for-byte the base that gets built, even if upstream ships a new
+`-b<build>` in between.
+
+The watcher also keeps the `Dockerfile` `ARG` and `compose.yml` defaults
+fresh: on each newest-only resolution it commits a
+`chore: pin default base to v<NNN>-cpu-b<build>` bump to main, so bare
+local builds never rot. (A manual watcher run pinned to an older
+`llama_swap_version` deliberately skips the sync — defaults track
+newest-only.)
 
 ## Build locally
 

@@ -21,6 +21,13 @@ name: watch-llama-swap
 #
 # Pin a specific podman version by filling the podman_version input in a
 # manual run, or run build.yml directly.
+#
+# The watcher also keeps the Dockerfile/compose.yml default base pins fresh:
+# after resolving the newest immutable v<NNN>-cpu-b<build> tag it commits a
+# "chore: pin default base" bump to main (skipped when a manual run pinned
+# an older llama_swap_version, so the defaults keep tracking newest-only).
+# A push to main never triggers build.yml (that only fires on tag pushes
+# and PRs), so the chore commit is inert beyond updating the defaults.
 
 on:
   schedule:
@@ -55,6 +62,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: scripts/**
 
       - name: Resolve upstream versions
         id: ver
@@ -110,9 +122,17 @@ jobs:
             exit 1
           fi
 
+          # Resolve the newest immutable base tag now, and pass it to the
+          # dispatch as base_tag: the base recorded/synced by the watcher is
+          # then exactly the base that gets built, even if upstream ships a
+          # new -b<build> between this tick and the build job.
+          BASE="$(uv run scripts/resolve_base.py "$VERSION")"
+          echo "resolved base: ${BASE}"
+
           {
             echo "version=${VERSION}"
             echo "podman=${PODMAN}"
+            echo "base=${BASE}"
             echo "tag=${VERSION}-podman${PODMAN}"
           } >> "$GITHUB_OUTPUT"
 
@@ -185,7 +205,7 @@ jobs:
               -H "Authorization: Bearer ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${{ steps.ver.outputs.podman }}\"}}"
+              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${{ steps.ver.outputs.podman }}\",\"base_tag\":\"${{ steps.ver.outputs.base }}\"}}"
           )"
           if [ "$code" != "204" ]; then
             echo "::error::workflow_dispatch returned HTTP ${code}"
@@ -193,6 +213,26 @@ jobs:
             exit 1
           fi
           echo "dispatched build.yml for ${{ steps.ver.outputs.tag }}"
+
+      # Keep the Dockerfile ARG / compose default in sync with the newest
+      # resolved base so bare local builds don't rot. Only on newest-only
+      # resolutions: a manual run pinned to an older llama_swap_version
+      # must not drag the defaults backwards.
+      - name: Sync pinned defaults
+        if: env.INPUT_VERSION == ''
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.ver.outputs.base }}"
+          sed -i -E "s|(ghcr\.io/mostlygeek/llama-swap:)v[0-9]+-cpu-b[0-9]+|\1${BASE}|g" Dockerfile compose.yml
+          if git diff --quiet; then
+            echo "defaults already at ${BASE}; nothing to sync"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "chore: pin default base to ${BASE} (${{ steps.ver.outputs.version }})"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo "synced Dockerfile + compose.yml defaults to ${BASE}"
+          fi
 
       - name: Nothing to do
         if: >
