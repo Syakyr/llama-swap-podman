@@ -1,8 +1,15 @@
 name: watch-llama-swap
 
-# Watches Mostlygeek/llama-swap for new releases and auto-tags
-# <version>-podman<X.Y.Z> as the provenance record (the podman version is
-# the PODMAN_VERSION env below), then triggers build.yml.
+# Watches BOTH upstreams and auto-tags <llama-swap>-podman<X.Y.Z> as the
+# provenance record, then triggers build.yml:
+#  - llama-swap: newest release drives the base image
+#  - podman:     newest *stable* release drives the baked-in remote CLI
+#    (GitHub's releases/latest excludes prereleases, so v7.0.0-rc1 style
+#    tags are never picked up — verified against containers/podman).
+#
+# Because the podman version is part of the tag, a podman bump alone (with
+# llama-swap unchanged) produces a new tag and a rebuild on the next tick;
+# an unchanged pair is skipped via the GHCR probe below.
 #
 # Carried-over lessons from halogen-timings-sidecar's watch workflow:
 #  1. Call api.github.com AUTHENTICATED (GITHUB_TOKEN). Anonymous calls from
@@ -12,8 +19,8 @@ name: watch-llama-swap
 #     GITHUB_TOKEN-triggered events create no runs). So we push the tag for
 #     the record AND call workflow_dispatch explicitly.
 #
-# The default PODMAN_VERSION here is what scheduled builds bake in; for a
-# specific podman version, run build.yml manually.
+# Pin a specific podman version by filling the podman_version input in a
+# manual run, or run build.yml directly.
 
 on:
   schedule:
@@ -24,6 +31,10 @@ on:
         description: "Upstream llama-swap version (blank = newest release)"
         required: false
         default: ""
+      podman_version:
+        description: "Podman version to bake in (blank = newest stable release)"
+        required: false
+        default: ""
 
 permissions:
   contents: write # push the provenance tag
@@ -31,7 +42,7 @@ permissions:
 
 env:
   UPSTREAM: Mostlygeek/llama-swap
-  PODMAN_VERSION: "6.1.2"
+  PODMAN_UPSTREAM: containers/podman
 
 jobs:
   tag-new-upstream:
@@ -39,12 +50,13 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       INPUT_VERSION: ${{ inputs.llama_swap_version }}
+      INPUT_PODMAN: ${{ inputs.podman_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Resolve upstream llama-swap version
+      - name: Resolve upstream versions
         id: ver
         run: |
           set -euo pipefail
@@ -69,9 +81,39 @@ jobs:
             echo "newest upstream llama-swap: ${VERSION}"
           fi
           VERSION="v${VERSION#v}"
+
+          # Newest stable podman release (releases/latest skips prereleases
+          # and drafts). Same authenticated-call rule as above.
+          PODMAN="${INPUT_PODMAN:-}"
+          if [ -n "$PODMAN" ]; then
+            echo "using manually requested podman version ${PODMAN}"
+          else
+            pbody="$(mktemp)"
+            pcode="$(
+              curl -sS --retry 3 --retry-all-errors \
+                -o "$pbody" -w '%{http_code}' \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${PODMAN_UPSTREAM}/releases/latest"
+            )"
+            if [ "$pcode" != "200" ]; then
+              echo "::error::podman release lookup returned HTTP ${pcode}"
+              head -c 800 "$pbody" || true
+              exit 1
+            fi
+            PODMAN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$pbody")"
+            PODMAN="${PODMAN#v}"
+            echo "newest stable podman: ${PODMAN}"
+          fi
+          if ! printf '%s' "$PODMAN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::podman version '${PODMAN}' is not X.Y.Z"
+            exit 1
+          fi
+
           {
             echo "version=${VERSION}"
-            echo "tag=${VERSION}-podman${PODMAN_VERSION}"
+            echo "podman=${PODMAN}"
+            echo "tag=${VERSION}-podman${PODMAN}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check tag and image state
@@ -143,7 +185,7 @@ jobs:
               -H "Authorization: Bearer ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${PODMAN_VERSION}\"}}"
+              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${{ steps.ver.outputs.podman }}\"}}"
           )"
           if [ "$code" != "204" ]; then
             echo "::error::workflow_dispatch returned HTTP ${code}"

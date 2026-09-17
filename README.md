@@ -66,8 +66,11 @@ podman exec llama-swap podman info --format '{{.Host.RemoteSocket.Path}}'
 ## Images & tags
 
 Prebuilt images: `ghcr.io/syakyr/llama-swap-podman`. A GitHub Actions
-watcher checks upstream every 6 hours and builds automatically on each new
-llama-swap release — no manual build needed, ever.
+watcher checks **both** upstreams every 6 hours — the newest llama-swap
+release *and* the newest stable podman release (`releases/latest` excludes
+RCs) — and builds automatically whenever either moves. A podman bump alone
+produces a new tag (`v256-podman6.2.0`) and a rebuild; an unchanged pair
+is skipped. No manual build needed, ever.
 
 <details>
 <summary>Don't want to wait up to 6 hours for a fresh upstream tag?</summary>
@@ -79,6 +82,8 @@ release now, or pin an exact one.
 ```bash
 # same thing from the CLI
 gh workflow run watch-llama-swap.yml -f llama_swap_version=v256
+# optionally pin the podman side too:
+gh workflow run watch-llama-swap.yml -f llama_swap_version=v256 -f podman_version=6.1.2
 ```
 
 Note that the watcher triggers `build.yml` with an explicit
@@ -146,10 +151,10 @@ git tag v256-podman6.1.2 && git push origin v256-podman6.1.2
 ```
 
 `workflow_dispatch` on `build.yml` does the same interactively (with
-explicit `llama_swap_version` / `podman_version` inputs). The
-`watch-llama-swap` workflow builds whatever `PODMAN_VERSION` is set to in
-that file — bump it there when you want scheduled builds to pick up a new
-podman release. Re-publishing an identical `v<NNN>-podman<X.Y.Z>` pairing
+explicit `llama_swap_version` / `podman_version` inputs). Scheduled
+watcher runs always take the newest stable podman release; pin it with the
+`podman_version` input on a manual watcher run if you need to hold it
+back. Re-publishing an identical `v<NNN>-podman<X.Y.Z>` pairing
 overwrites that GHCR tag, so cut a new podman patch (or use `base_tag`
 overrides in a dispatch) when you need a distinct immutable record.
 
