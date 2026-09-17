@@ -23,9 +23,9 @@ provenance, GitHub Actions publishing to GHCR.
 Push a tag `v<llama-swap>-podman<N>` (e.g. `v256-podman1`) and `build.yml`
 publishes:
 
-- `ghcr.io/<owner>/<repo>:v256-podman1` — immutable build record
-- `ghcr.io/<owner>/<repo>:v256` — latest podman build of that llama-swap version
-- `ghcr.io/<owner>/<repo>:latest` — only when `v256` is the newest upstream release
+- `ghcr.io/syakyr/llama-swap-podman:v256-podman1` — immutable build record
+- `ghcr.io/syakyr/llama-swap-podman:v256` — latest podman build of that llama-swap version
+- `ghcr.io/syakyr/llama-swap-podman:latest` — only when `v256` is the newest upstream release
 
 The exact base (`v256-cpu-b<build>`) is resolved at build time via
 `scripts/resolve_base.py` and recorded in the run summary — the floating
@@ -51,7 +51,7 @@ podman compose up -d
 
 Or point compose at a published image instead of building: edit
 `services.llama-swap.image` to
-`ghcr.io/<owner>/<repo>:v256-podman1` and drop the `build:` block.
+`ghcr.io/syakyr/llama-swap-podman:v256-podman1` and drop the `build:` block.
 
 ## Verified / unverified
 
