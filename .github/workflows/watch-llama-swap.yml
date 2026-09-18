@@ -5,7 +5,16 @@ name: watch-llama-swap
 #  - llama-swap: newest release drives the base image
 #  - podman:     newest *stable* release drives the baked-in remote CLI
 #    (GitHub's releases/latest excludes prereleases, so v7.0.0-rc1 style
-#    tags are never picked up — verified against containers/podman).
+#    tags are never picked up — verified against the podman repo).
+#
+#  3. Upstream repos get renamed. containers/podman moved to
+#     podman-container-tools/podman (repo id 109145553) and the old path
+#     now answers 301, which the old non-following curl treated as a hard
+#     failure. PODMAN_UPSTREAM points at the current full name AND every
+#     API lookup passes -L so a future rename costs a redirect, not a red
+#     run. Verified: curl keeps the Authorization header across the
+#     api.github.com -> api.github.com redirect (final response still
+#     reports x-ratelimit-limit: 5000, i.e. still authenticated).
 #
 # Because the podman version is part of the tag, a podman bump alone (with
 # llama-swap unchanged) produces a new tag and a rebuild on the next tick;
@@ -49,7 +58,7 @@ permissions:
 
 env:
   UPSTREAM: Mostlygeek/llama-swap
-  PODMAN_UPSTREAM: containers/podman
+  PODMAN_UPSTREAM: podman-container-tools/podman  # renamed from containers/podman
 
 jobs:
   tag-new-upstream:
@@ -78,7 +87,7 @@ jobs:
           else
             body="$(mktemp)"
             code="$(
-              curl -sS --retry 3 --retry-all-errors \
+              curl -sSL --retry 3 --retry-all-errors \
                 -o "$body" -w '%{http_code}' \
                 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
@@ -102,7 +111,7 @@ jobs:
           else
             pbody="$(mktemp)"
             pcode="$(
-              curl -sS --retry 3 --retry-all-errors \
+              curl -sSL --retry 3 --retry-all-errors \
                 -o "$pbody" -w '%{http_code}' \
                 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \

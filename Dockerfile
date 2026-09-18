@@ -5,14 +5,16 @@
 # `cpu` tag) so every published image has a reproducible provenance record.
 # The podman-remote download is pinned to a release version too; the asset
 # name pattern podman-remote-static-linux_{amd64,arm64}.tar.gz was verified
-# against the v6.1.2 release.
+# against the v6.1.2 release. Repo org was renamed containers ->
+# podman-container-tools; the old path 301-redirects (ADD follows it), but
+# we point at the current name so the URL stays honest.
 ARG LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:v256-cpu-b11011
 FROM ${LLAMA_SWAP_IMAGE}
 
 ARG PODMAN_VERSION=6.1.2
 ARG TARGETARCH=amd64
 
-ADD https://github.com/containers/podman/releases/download/v${PODMAN_VERSION}/podman-remote-static-linux_${TARGETARCH}.tar.gz /tmp/podman-remote.tar.gz
+ADD https://github.com/podman-container-tools/podman/releases/download/v${PODMAN_VERSION}/podman-remote-static-linux_${TARGETARCH}.tar.gz /tmp/podman-remote.tar.gz
 
 RUN tar -xzf /tmp/podman-remote.tar.gz -C /tmp && \
     install -m 0755 /tmp/bin/podman-remote-static-linux_${TARGETARCH} /usr/local/bin/podman && \
