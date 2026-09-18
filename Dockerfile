@@ -8,7 +8,7 @@
 # against the v6.1.2 release. Repo org was renamed containers ->
 # podman-container-tools; the old path 301-redirects (ADD follows it), but
 # we point at the current name so the URL stays honest.
-ARG LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:v256-cpu-b11011
+ARG LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:v256-cpu-b11028
 FROM ${LLAMA_SWAP_IMAGE}
 
 ARG PODMAN_VERSION=6.1.2
