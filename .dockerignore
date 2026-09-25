@@ -1,0 +1,15 @@
+# Build context hygiene: the image is assembled from downloaded release
+# assets and the healthcheck sources only — nothing here is needed, and
+# keeping .git out of the context keeps builds fast and reproducible.
+.git
+.gitignore
+.github
+README.md
+docs/
+compose.yml
+scripts/
+*.log
+__pycache__/
+.uv-cache/
+llama-swap-data/
+config.yaml

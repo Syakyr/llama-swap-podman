@@ -1,0 +1,53 @@
+llama-swap-podman
+Copyright (c) 2026 Syakyr Surani
+
+This repository and its own code (Dockerfile, healthcheck probe, scripts,
+workflows, documentation) are licensed under the MIT License — see LICENSE.
+
+This project builds and redistributes unmodified binaries from upstream
+projects. Their licenses are listed below and their license texts are vendored
+under licenses/. The built image carries this NOTICE and those texts at
+/usr/share/licenses/llama-swap-podman/.
+
+--------------------------------------------------------------------------------
+Third-party components shipped in the image
+--------------------------------------------------------------------------------
+
+llama-swap
+  License   MIT
+  Copyright (c) 2024 Benson Wong
+  Upstream  https://github.com/Mostlygeek/llama-swap
+  In image  /app/llama-swap  (unmodified upstream release binary)
+  Text      licenses/llama-swap-MIT.txt
+
+podman-remote (static)
+  License   Apache License 2.0
+  Copyright The Podman Authors
+  Upstream  https://github.com/podman-container-tools/podman
+  In image  /usr/local/bin/podman  (unmodified upstream release binary)
+  Text      licenses/podman-Apache-2.0.txt
+  Note      podman ships no NOTICE file upstream; the Apache-2.0 text is
+            included here to satisfy redistribution requirements.
+
+Go runtime
+  License   BSD 3-Clause
+  Copyright The Go Authors
+  Upstream  https://go.dev
+  In image  statically linked into /app/healthcheck, and into both upstream
+            Go binaries above
+
+CA certificate bundle
+  License   per-certificate; a collection of CA root certificates
+  Upstream  debian ca-certificates (build-time copy)
+  In image  /etc/ssl/certs/ca-certificates.crt
+
+--------------------------------------------------------------------------------
+Not redistributed by this project
+--------------------------------------------------------------------------------
+
+Build-time base images (alpine, golang, debian:trixie-slim) contribute layers
+to the build but nothing to the final image, which is FROM scratch.
+
+Model containers that this aggregator spawns are separate works with their own
+licenses and are not covered by this file or by the MIT license of this
+repository.

@@ -2,39 +2,23 @@
 
 # 🦙 llama-swap + Podman
 
-### llama-swap that spawns its models on your **host** podman.
+### llama-swap as a pure **aggregator** — its models run as containers on your host podman.
 
-A wrapped [llama-swap](https://github.com/Mostlygeek/llama-swap) CPU image
-with a static **podman-remote** CLI baked in, so the container talks to your
-user podman socket (`CONTAINER_HOST=unix:///podman.sock`) instead of needing
-a runtime inside itself.
+The upstream llama-swap release binary plus a static **podman-remote** CLI,
+on `scratch`. No llama.cpp, no OS packages: llama-swap routes, and every
+model runtime is a separate container spawned through your user podman
+socket (`CONTAINER_HOST=unix:///podman.sock`).
 
 [![build](https://github.com/syakyr/llama-swap-podman/actions/workflows/build.yml/badge.svg)](https://github.com/syakyr/llama-swap-podman/actions/workflows/build.yml)
 [![watch-llama-swap](https://github.com/syakyr/llama-swap-podman/actions/workflows/watch-llama-swap.yml/badge.svg)](https://github.com/syakyr/llama-swap-podman/actions/workflows/watch-llama-swap.yml)
 ![latest build](https://img.shields.io/github/v/tag/Syakyr/llama-swap-podman?label=latest%20build&color=brightgreen)
-![podman-remote](https://img.shields.io/badge/podman--remote-6.1.2-orange)
-![base](https://img.shields.io/badge/base-llama--swap%3Av256--cpu-blue)
+![image size](https://img.shields.io/badge/image-~50_MB-brightgreen)
 
 **Pull · Mount the socket · Done.**
 
 </div>
 
 ---
-
-## The problem, in one mount
-
-llama-swap in a container cannot spawn model containers unless the image
-carries a container client *and* can reach a daemon. This image ships
-`podman-remote` (static, no deps); you supply the daemon by mounting your
-user socket:
-
-```
-llama-swap container ──/podman.sock──▶ ~/.local/share/…/podman/podman.sock (host)
-        │                                     │
-        └── CONTAINER_HOST=unix:///podman.sock ── model containers run on the host
-```
-
-Every byte of llama-swap itself is upstream — the only change is the image name.
 
 ## Quick start
 
@@ -51,125 +35,82 @@ podman run -d --name llama-swap \
   ghcr.io/syakyr/llama-swap-podman:latest
 ```
 
-Or use the included compose file (builds the same Dockerfile locally):
+Or with the included compose file:
 
 ```bash
-podman compose up -d --build
+podman compose up -d
 ```
 
-Verify the remote CLI inside the container sees your host daemon:
+Confirm the baked-in CLI reaches your host daemon:
 
 ```bash
 podman exec llama-swap podman info --format '{{.Host.RemoteSocket.Path}}'
 ```
 
+Paths are fixed at `/app/llama-swap` (binary), `/app/config.yaml` (config)
+and `/app` (working directory). In your model config, `cmd:` is a plain
+`podman run …` and `cmdStop:` is `podman stop ${MODEL_ID}`.
+
 ## Images & tags
 
-Prebuilt images: `ghcr.io/syakyr/llama-swap-podman`. A GitHub Actions
-watcher checks **both** upstreams every 6 hours — the newest llama-swap
-release *and* the newest stable podman release (`releases/latest` excludes
-RCs) — and builds automatically whenever either moves. A podman bump alone
-produces a new tag (`v256-podman6.2.0`) and a rebuild; an unchanged pair
-is skipped. No manual build needed, ever.
-
-<details>
-<summary>Don't want to wait up to 6 hours for a fresh upstream tag?</summary>
-
-Run **watch-llama-swap** manually (`Actions → watch-llama-swap → Run
-workflow`) and leave `llama_swap_version` blank to build the newest upstream
-release now, or pin an exact one.
-
-```bash
-# same thing from the CLI
-gh workflow run watch-llama-swap.yml -f llama_swap_version=v256
-# optionally pin the podman side too:
-gh workflow run watch-llama-swap.yml -f llama_swap_version=v256 -f podman_version=6.1.2
-```
-
-Note that the watcher triggers `build.yml` with an explicit
-`workflow_dispatch` rather than relying on its own tag push: a tag pushed
-with `GITHUB_TOKEN` does not start other workflows (only
-`workflow_dispatch`/`repository_dispatch` cross that boundary), so the tag
-is kept purely as provenance.
-
-</details>
+`ghcr.io/syakyr/llama-swap-podman`
 
 | Tag | Meaning |
 |---|---|
-| `latest` | newest llama-swap version with a built image |
-| `v<NNN>` | latest build for that llama-swap version (moves on rebuild) |
-| `v<NNN>-podman<X.Y.Z>` | immutable pairing of llama-swap `v<NNN>` with podman-remote `X.Y.Z` — pin this for reproducibility |
+| `latest` | newest llama-swap release with a built image |
+| `v<NNN>` | latest build for that llama-swap version |
+| `v<NNN>-podman<X.Y.Z>` | immutable pairing of llama-swap `v<NNN>` with podman-remote `X.Y.Z` — pin this |
+| `dev` | rolling build from `main`/`feat/**` |
+| `dev-<shortsha>` | the exact dev build for a commit |
 
-The tag encodes both upstream versions: `v256-podman6.1.2` is exactly
-llama-swap v256 wrapped with podman-remote 6.1.2. Bumping the podman side
-is just a different tag: `v256-podman7.0.0`.
+A watcher checks both upstreams every 6 hours and builds whenever either
+moves. See [docs/releasing.md](docs/releasing.md).
 
-<details>
-<summary>List available tags without pulling</summary>
+## Healthcheck
 
-```bash
-curl -s "https://ghcr.io/token?scope=repository:syakyr/llama-swap-podman:pull" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' \
-  | xargs -I{} curl -s -H "Authorization: Bearer {}" \
-      https://ghcr.io/v2/syakyr/llama-swap-podman/tags/list \
-  | python3 -m json.tool
-```
-
-</details>
-
-## Pinned bases, resolved not assumed
-
-The floating `cpu` tag is never baked in blindly. Each build resolves the
-newest **immutable** `v<NNN>-cpu-b<build>` tag on GHCR and records it in
-the run summary:
+The image ships a healthcheck, so `podman inspect` reports real liveness:
 
 ```bash
-uv run scripts/resolve_base.py v256
-# → v256-cpu-b11011
+podman inspect -f '{{.State.Health.Status}}' llama-swap
 ```
 
-`build.yml` accepts a `base_tag` input to override the resolution with an
-exact base if you need to rebuild against a specific upstream build — and
-the watcher uses exactly that: it resolves the base once per tick and
-passes it into the dispatch, so the base recorded by the watcher is
-byte-for-byte the base that gets built, even if upstream ships a new
-`-b<build>` in between.
+It probes `GET /health` and, when `CONTAINER_HOST` declares a `unix://`
+socket, that the socket is reachable. The port is discovered from the
+running process, so a custom `--listen` needs no configuration. Full
+reference: [docs/healthcheck.md](docs/healthcheck.md).
 
-The watcher also keeps the `Dockerfile` `ARG` and `compose.yml` defaults
-fresh: on each newest-only resolution it commits a
-`chore: pin default base to v<NNN>-cpu-b<build>` bump to main, so bare
-local builds never rot. (A manual watcher run pinned to an older
-`llama_swap_version` deliberately skips the sync — defaults track
-newest-only.)
+## Docs
 
-## Build locally
+| | |
+|---|---|
+| [docs/design.md](docs/design.md) | why a scratch repackage instead of the `cpu`/`unified` images |
+| [docs/healthcheck.md](docs/healthcheck.md) | what the probe checks, port discovery, env vars, troubleshooting |
+| [docs/building.md](docs/building.md) | checksum pinning, local build, smoke tests, size budget |
+| [docs/releasing.md](docs/releasing.md) | tag flow, the watcher, dispatch modes, rollback |
 
-```bash
-BASE=$(uv run scripts/resolve_base.py v256)
-podman build -t llama-swap-podman:local \
-  --build-arg LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:${BASE} \
-  --build-arg PODMAN_VERSION=6.1.2 .
+## Layout
+
+```
+Dockerfile                 scratch build: fetch+verify, healthcheck build, runtime
+healthcheck/               static Go liveness probe (unit tested)
+scripts/resolve_release.py resolve upstream versions + published checksums
+scripts/smoke_test.sh      the smoke suite CI runs against the built image
+compose.yml                local run/deploy with the same pins
+licenses/                  vendored upstream license texts
+LICENSE  NOTICE            MIT (this project) + third-party inventory
+docs/                      design, healthcheck, building, releasing
 ```
 
-Then run it exactly as in the Quick start, swapping the image name.
+## License
 
-## Releasing a change
-
-```bash
-git tag v256-podman6.1.2 && git push origin v256-podman6.1.2
-# → build.yml smoke-tests the image, then publishes
-#   :v256-podman6.1.2 (immutable) and moves :v256 to it
-```
-
-`workflow_dispatch` on `build.yml` does the same interactively (with
-explicit `llama_swap_version` / `podman_version` inputs). Scheduled
-watcher runs always take the newest stable podman release; pin it with the
-`podman_version` input on a manual watcher run if you need to hold it
-back. Re-publishing an identical `v<NNN>-podman<X.Y.Z>` pairing
-overwrites that GHCR tag, so cut a new podman patch (or use `base_tag`
-overrides in a dispatch) when you need a distinct immutable record.
+MIT — see [LICENSE](LICENSE). The image ships unmodified upstream binaries
+under MIT (llama-swap) and Apache-2.0 (podman-remote); the `NOTICE` and
+those license texts are copied into the image at
+`/usr/share/licenses/llama-swap-podman/`, so the distributed artifact
+carries its own attribution. Model containers this aggregator spawns are
+separate works under their own licenses. Full inventory: [NOTICE](NOTICE).
 
 ## Related
 
-- [halogen-timings-sidecar](https://github.com/Syakyr/halogen-timings-sidecar) — the sibling wrapper this repo's CI pattern is copied from
-- [llama-swap docs: containers](https://github.com/Mostlygeek/llama-swap) — upstream configuration for container-based models
+- [llama-swap](https://github.com/Mostlygeek/llama-swap) — upstream; its docs cover container-based model config
+- [halogen-timings-sidecar](https://github.com/Syakyr/halogen-timings-sidecar) — one of the model runtimes this aggregator spawns

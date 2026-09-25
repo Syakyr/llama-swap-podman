@@ -1,38 +1,59 @@
 name: build
 
-# Builds the wrapped llama-swap + podman-remote image and publishes it to GHCR.
+# Builds the llama-swap aggregator image (upstream release binary +
+# podman-remote, on scratch) and publishes it to GHCR.
 #
-# Provenance tag scheme: the tag encodes BOTH upstream versions.
-#   push tag  v<llama-swap>-podman<X.Y.Z>   e.g. v256-podman6.1.2
-#     -> ghcr.io/<owner>/<repo>:v256-podman6.1.2   (immutable build record)
-#     -> ghcr.io/<owner>/<repo>:v256               (latest build of that version)
-#     -> ghcr.io/<owner>/<repo>:latest             (only when v256 is the newest upstream release)
+# Three modes, picked from the event:
 #
-# The exact base image is resolved at build time to the newest immutable
-# v<ver>-cpu-b<build> tag via scripts/resolve_base.py (uv), so the floating
-# `cpu` tag is never baked in blindly. The resolved base is recorded in the
-# job summary.
+#   release  tag push v<llama-swap>-podman<X.Y.Z>
+#              -> :v258-podman6.1.2   immutable pairing record
+#              -> :v258                latest build of that llama-swap version
+#              -> :latest              only when v258 is the newest upstream release
+#   dev      push to main or feat/**
+#              -> :dev                 rolling, for testing before a release
+#              -> :dev-<shortsha>     the exact build you tested
+#   test     pull_request (and dispatch with mode=test)
+#              -> builds and smoke-tests, pushes nothing
+#
+# Nothing is baked from a floating tag: both release assets are pinned by
+# sha256, resolved from the checksums each upstream publishes (or passed in
+# explicitly on a dispatch) and recorded in the image labels and job summary.
 
 on:
   push:
     tags: ["v[p0-9]*-podman[0-9]*"]
+    branches: ["main", "feat/**"]
   pull_request:
   workflow_dispatch:
     inputs:
       llama_swap_version:
-        description: "Upstream llama-swap version (e.g. v256)"
-        required: true
-      podman_version:
-        description: "Podman version for the baked-in remote CLI (e.g. 6.1.2)"
-        required: true
-        default: "6.1.2"
-      base_tag:
-        description: "Optional exact base tag override (skips GHCR resolution), e.g. v256-cpu-b11011"
+        description: "Upstream llama-swap version (blank = newest release)"
         required: false
         default: ""
+      podman_version:
+        description: "Podman version for the baked-in remote CLI (blank = newest stable)"
+        required: false
+        default: ""
+      ls_sha256:
+        description: "Optional sha256 override for the llama-swap tarball"
+        required: false
+        default: ""
+      podman_sha256:
+        description: "Optional sha256 override for the podman-remote tarball"
+        required: false
+        default: ""
+      mode:
+        description: "Publish mode"
+        type: choice
+        options: [auto, release, dev, test]
+        default: auto
 
 env:
   REGISTRY: ghcr.io
+  # Uncompressed size ceiling. The runtime is llama-swap (~43 MB) +
+  # podman-remote (~47 MB) + CA bundle + healthcheck (~6 MB) ≈ 96 MB. A jump
+  # past this means something heavy crept into the image.
+  SIZE_LIMIT_BYTES: 130000000
 
 jobs:
   image:
@@ -48,60 +69,118 @@ jobs:
           enable-cache: true
           cache-dependency-glob: scripts/**
 
-      - name: Resolve versions
+      - name: Resolve versions and checksums
         id: ver
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          IN_MODE: ${{ inputs.mode }}
+          IN_LS: ${{ inputs.llama_swap_version }}
+          IN_PODMAN: ${{ inputs.podman_version }}
+          IN_LS_SHA: ${{ inputs.ls_sha256 }}
+          IN_PODMAN_SHA: ${{ inputs.podman_sha256 }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VER="${{ inputs.llama_swap_version }}"
-            PODMAN="${{ inputs.podman_version }}"
-            BASE_OVERRIDE="${{ inputs.base_tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-            VER="${TAG%%-podman*}"
-            PODMAN="${TAG##*-podman}"
-            BASE_OVERRIDE=""
-          fi
-          VER="v${VER#v}"   # normalize to vNNN
 
-          # The podman part of the tag must be a real X.Y.Z version; refuse
-          # anything else rather than bake a typo into a published tag.
+          case "$EVENT_NAME" in
+            push)
+              if [ "$REF_TYPE" = "tag" ]; then MODE=release; else MODE=dev; fi ;;
+            pull_request) MODE=test ;;
+            workflow_dispatch)
+              MODE="${IN_MODE:-auto}"
+              [ "$MODE" = "auto" ] && MODE=dev ;;
+            *) MODE=test ;;
+          esac
+
+          # Versions come from inputs by default. A tag push overrides them with
+          # the tag itself, because the tag IS the provenance record. A
+          # workflow_dispatch with mode=release runs on a branch ref, so it
+          # must carry both versions as inputs (the watcher always does).
+          LS="${IN_LS:-}"
+          PODMAN="${IN_PODMAN:-}"
+          if [ "$MODE" = "release" ] && [ "$REF_TYPE" = "tag" ]; then
+            LS="${REF_NAME%%-podman*}"
+            PODMAN="${REF_NAME##*-podman}"
+          fi
+
+          LS="v${LS#v}"
+          if [ "$LS" = "v" ]; then
+            if [ "$MODE" = "release" ]; then
+              echo "::error::release mode needs llama_swap_version (a branch ref carries no version)"
+              exit 1
+            fi
+            LS="v$(uv run scripts/resolve_release.py --field ls_version)"
+          fi
+          if [ -z "$PODMAN" ]; then
+            if [ "$MODE" = "release" ]; then
+              echo "::error::release mode needs podman_version (a branch ref carries no version)"
+              exit 1
+            fi
+            PODMAN="$(uv run scripts/resolve_release.py "$LS" --field podman_version)"
+          fi
+
+          # Refuse a malformed pairing before spending requests on checksums.
+          if ! printf '%s' "${LS#v}" | grep -Eq '^[0-9]+$'; then
+            echo "::error::llama-swap version '${LS}' is not v<digits>"
+            exit 1
+          fi
           if ! printf '%s' "$PODMAN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::podman version '${PODMAN}' is not X.Y.Z"
             exit 1
           fi
 
-          if [ -n "$BASE_OVERRIDE" ]; then
-            BASE="$BASE_OVERRIDE"
-          else
-            BASE="$(uv run scripts/resolve_base.py "$VER")"
+          LS_SHA="${IN_LS_SHA:-}"
+          PODMAN_SHA="${IN_PODMAN_SHA:-}"
+          if [ -z "$LS_SHA" ]; then
+            LS_SHA="$(uv run scripts/resolve_release.py "$LS" "$PODMAN" --field ls_sha256)"
+          fi
+          if [ -z "$PODMAN_SHA" ]; then
+            PODMAN_SHA="$(uv run scripts/resolve_release.py "$LS" "$PODMAN" --field podman_sha256)"
           fi
 
-          # Is this the newest upstream llama-swap release? Authenticated call:
-          # anonymous api.github.com quota is shared and routinely 403s from
-          # GitHub-hosted runners (lesson carried over from halogen watch).
-          LATEST_UPSTREAM="$(
-            curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              https://api.github.com/repos/Mostlygeek/llama-swap/releases/latest \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))'
-          )"
-          IS_LATEST=no
-          [ "${VER#v}" = "$LATEST_UPSTREAM" ] && IS_LATEST=yes
+          for pair in "llama-swap:$LS_SHA" "podman:$PODMAN_SHA"; do
+            if ! printf '%s' "${pair#*:}" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::${pair%%:*} sha256 '${pair#*:}' is not 64 hex chars"
+              exit 1
+            fi
+          done
 
-          # GHCR namespaces must be lowercase; github.repository keeps display case.
-          IMAGE="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          IS_LATEST=no
+          if [ "$MODE" = "release" ]; then
+            NEWEST="$(uv run scripts/resolve_release.py --field ls_version)"
+            [ "${LS#v}" = "$NEWEST" ] && IS_LATEST=yes
+          fi
+
+          IMAGE="$(echo "$REPO" | tr '[:upper:]' '[:lower:]')"
+          SHORT="${SHA:0:7}"
+
           {
-            echo "llama_swap=$VER"
+            echo "mode=$MODE"
+            echo "llama_swap=$LS"
+            echo "ls_num=${LS#v}"
             echo "podman=$PODMAN"
-            echo "base=$BASE"
+            echo "ls_sha256=$LS_SHA"
+            echo "podman_sha256=$PODMAN_SHA"
             echo "is_latest=$IS_LATEST"
             echo "image=$IMAGE"
+            echo "short_sha=$SHORT"
           } >> "$GITHUB_OUTPUT"
-          echo "Building ${IMAGE}:${VER}-podman${PODMAN} from ghcr.io/mostlygeek/llama-swap:${BASE} (latest=${IS_LATEST})"
-          echo "### Image plan" >> "$GITHUB_STEP_SUMMARY"
-          echo "- base: \`ghcr.io/mostlygeek/llama-swap:${BASE}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- podman-remote: \`${PODMAN}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- tags: \`${VER}-podman${PODMAN}\`, \`${VER}\`$( [ "$IS_LATEST" = yes ] && echo ", \`latest\`" )" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "### Image plan"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| mode | \`$MODE\` |"
+            echo "| llama-swap | \`$LS\` |"
+            echo "| llama-swap sha256 | \`$LS_SHA\` |"
+            echo "| podman-remote | \`$PODMAN\` |"
+            echo "| podman-remote sha256 | \`$PODMAN_SHA\` |"
+            echo "| newest upstream | \`$([ "$IS_LATEST" = yes ] && echo yes || echo no)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -112,45 +191,70 @@ jobs:
           push: false
           load: true
           build-args: |
-            LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:${{ steps.ver.outputs.base }}
+            LS_VERSION=${{ steps.ver.outputs.ls_num }}
+            LS_SHA256=${{ steps.ver.outputs.ls_sha256 }}
             PODMAN_VERSION=${{ steps.ver.outputs.podman }}
+            PODMAN_SHA256=${{ steps.ver.outputs.podman_sha256 }}
           tags: llama-swap-podman:smoke
           cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
           cache-to: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }},mode=max
 
       - name: Smoke test
         run: |
+          ./scripts/smoke_test.sh llama-swap-podman:smoke \
+            "${{ steps.ver.outputs.llama_swap }}" \
+            "${{ steps.ver.outputs.podman }}"
+
+      - name: Size budget
+        run: |
           set -euo pipefail
-          echo "podman-remote in the image:"
-          # NB: `podman version --client` is a docker-ism; podman has no such
-          # flag (verified: exit 125, "unknown flag: --client"). --version
-          # prints the client version without needing a daemon.
-          docker run --rm --entrypoint podman llama-swap-podman:smoke --version
-          echo "llama-swap binary responds to --help:"
-          docker run --rm --entrypoint /app/llama-swap llama-swap-podman:smoke --help 2>&1 | grep -qi usage
-          echo "base entrypoint preserved:"
-          docker inspect --format '{{.Config.Entrypoint}}' llama-swap-podman:smoke | grep -q '/app/llama-swap'
+          size="$(docker image inspect -f '{{.Size}}' llama-swap-podman:smoke)"
+          echo "uncompressed image size: $size bytes"
+          if [ "$size" -gt "$SIZE_LIMIT_BYTES" ]; then
+            echo "::error::image is $size bytes, over the $SIZE_LIMIT_BYTES budget"
+            exit 1
+          fi
+          echo "- image size: \`$size\` bytes (budget \`$SIZE_LIMIT_BYTES\`)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: steps.ver.outputs.mode != 'test'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push
-        if: github.event_name != 'pull_request'
+      - name: Push (release)
+        if: steps.ver.outputs.mode == 'release'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           build-args: |
-            LLAMA_SWAP_IMAGE=ghcr.io/mostlygeek/llama-swap:${{ steps.ver.outputs.base }}
+            LS_VERSION=${{ steps.ver.outputs.ls_num }}
+            LS_SHA256=${{ steps.ver.outputs.ls_sha256 }}
             PODMAN_VERSION=${{ steps.ver.outputs.podman }}
+            PODMAN_SHA256=${{ steps.ver.outputs.podman_sha256 }}
           tags: |
             ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}-podman${{ steps.ver.outputs.podman }}
             ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}
             ${{ steps.ver.outputs.is_latest == 'yes' && format('ghcr.io/{0}:latest', steps.ver.outputs.image) || '' }}
+          cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
+          cache-to: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }},mode=max
+
+      - name: Push (dev)
+        if: steps.ver.outputs.mode == 'dev'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            LS_VERSION=${{ steps.ver.outputs.ls_num }}
+            LS_SHA256=${{ steps.ver.outputs.ls_sha256 }}
+            PODMAN_VERSION=${{ steps.ver.outputs.podman }}
+            PODMAN_SHA256=${{ steps.ver.outputs.podman_sha256 }}
+          tags: |
+            ghcr.io/${{ steps.ver.outputs.image }}:dev
+            ghcr.io/${{ steps.ver.outputs.image }}:dev-${{ steps.ver.outputs.short_sha }}
           cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
           cache-to: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }},mode=max

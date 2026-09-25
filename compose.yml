@@ -1,28 +1,43 @@
-# Local development / deployment compose. The image is the wrapped
-# llama-swap + podman-remote built by .github/workflows/build.yml;
-# `podman compose up` here rebuilds it locally from the same Dockerfile.
+# Local development / deployment compose. The image is the llama-swap
+# aggregator built by .github/workflows/build.yml; `podman compose up --build`
+# here rebuilds it locally from the same Dockerfile.
 #
 # Requires the user podman socket at /run/user/1000/podman/podman.sock
 # (systemctl --user start podman.socket).
+#
+# The pins below are the sha256 of each upstream release asset, kept fresh by
+# the watch-llama-swap workflow. Resolve them by hand with:
+#
+#   uv run scripts/resolve_release.py                 # newest of both upstreams
+#   uv run scripts/resolve_release.py v258 6.1.2 --field ls_sha256
 services:
   llama-swap:
     build:
       context: .
       args:
-        LLAMA_SWAP_IMAGE: ${LLAMA_SWAP_IMAGE:-ghcr.io/mostlygeek/llama-swap:v258-cpu-b11176}
+        LS_VERSION: ${LS_VERSION:-258}
+        LS_SHA256: ${LS_SHA256:-8f0865e08940be7acf2adac97f736ef0f7bf56d969b1f77b10ea395a29fab9f9}
         PODMAN_VERSION: ${PODMAN_VERSION:-6.1.2}
+        PODMAN_SHA256: ${PODMAN_SHA256:-6785e4dc11dad67000308749fed0f981698792309830a6b870bd5a97b3527182}
     image: llama-swap-podman:local
     network_mode: host
     environment:
+      # seam: point the baked-in podman-remote at the host socket mounted below
       - CONTAINER_HOST=unix:///podman.sock
     volumes:
       - ./config.yaml:/app/config.yaml
       - ./llama-swap-data:/data/llama-swap
       - /run/user/1000/podman/podman.sock:/podman.sock
     restart: unless-stopped
+    # The image's own CMD is `-config /app/config.yaml -watch-config`; a
+    # compose `command:` replaces it outright (it no longer appends to a
+    # flag-carrying ENTRYPOINT, so flags are not duplicated).
     command:
-      - "--config"
+      - "-config"
       - "/app/config.yaml"
-      - "--listen"
+      - "-listen"
       - "0.0.0.0:8080"
-      - "--watch-config"
+      - "-watch-config"
+    # The image ships its own HEALTHCHECK (/app/healthcheck). Uncomment to
+    # watch it:
+    #   watch -n5 "podman inspect -f '{{.State.Health.Status}}' llama-swap-podman-local"
