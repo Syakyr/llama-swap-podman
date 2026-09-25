@@ -12,7 +12,7 @@ socket (`CONTAINER_HOST=unix:///podman.sock`).
 [![build](https://github.com/syakyr/llama-swap-podman/actions/workflows/build.yml/badge.svg)](https://github.com/syakyr/llama-swap-podman/actions/workflows/build.yml)
 [![watch-llama-swap](https://github.com/syakyr/llama-swap-podman/actions/workflows/watch-llama-swap.yml/badge.svg)](https://github.com/syakyr/llama-swap-podman/actions/workflows/watch-llama-swap.yml)
 ![latest build](https://img.shields.io/github/v/tag/Syakyr/llama-swap-podman?label=latest%20build&color=brightgreen)
-![image size](https://img.shields.io/badge/image-~96_MB-brightgreen)
+![image size](https://img.shields.io/badge/image-50.6_MB_compressed-brightgreen)
 ![podman--remote](https://img.shields.io/badge/podman--remote-6.1.2-orange)
 
 **Pull · Mount the socket · Done.**
@@ -29,7 +29,7 @@ llama-swap ships two kinds of image. Neither fits an aggregator:
 |---|---|---|
 | `llama-swap:<ver>-cpu` (what this repo used to wrap) | 331 MB | llama.cpp's `llama-server` base + llama-swap |
 | `llama-swap:unified-*` | 586 MB – 5.5 GB | llama.cpp, ik-llama, whisper, stable-diffusion, audio, all built from source |
-| **this image** | **~96 MB** | llama-swap release binary, podman-remote, CA bundle, healthcheck |
+| **this image** | **50.6 MB** | llama-swap release binary, podman-remote, CA bundle, healthcheck |
 
 In this deployment llama-swap never runs a model itself — `cmd:` in the
 config is `podman run …`, so the model runtime lives in *another* image
@@ -127,6 +127,11 @@ produces a new tag and a rebuild; an unchanged pair is skipped.
 podman pull ghcr.io/syakyr/llama-swap-podman:dev
 ```
 
+Measured on the `dev` build (llama-swap v258 + podman 6.1.2):
+**50.6 MB compressed / 96.4 MB uncompressed**, layers
+`[0.1 CA bundle, 23.2 llama-swap, 24.8 podman-remote, 2.5 healthcheck]`.
+The previous base-wrapped image was 380 MB compressed.
+
 <details>
 <summary>Don't want to wait up to 6 hours for a fresh upstream tag?</summary>
 
@@ -144,6 +149,42 @@ rather than relying on its own tag push: a tag pushed with `GITHUB_TOKEN`
 does not start other workflows, so the tag is kept purely as provenance.
 
 </details>
+
+## Testing this branch against a live deployment
+
+The `dev` tag is built from `main`/`feat/**` on every push, so a branch is
+usable before it merges. Against the same mounts you already run:
+
+```bash
+# 1. pull and point your compose at the dev tag (image: only — same paths)
+podman pull ghcr.io/syakyr/llama-swap-podman:dev
+
+# 2. swap the container in place
+podman stop llama-swap && podman rm llama-swap
+podman run -d --name llama-swap \
+  --network host \
+  -e CONTAINER_HOST=unix:///podman.sock \
+  -v /run/user/$(id -u)/podman/podman.sock:/podman.sock \
+  -v ./config.yaml:/app/config.yaml \
+  -v ./llama-swap-data:/data/llama-swap \
+  ghcr.io/syakyr/llama-swap-podman:dev \
+  -config /app/config.yaml -listen 0.0.0.0:8080 -watch-config
+
+# 3. watch the healthcheck go green
+watch -n5 "podman inspect -f '{{.State.Health.Status}}' llama-swap"
+
+# 4. confirm it still drives the host daemon and can spawn a model
+podman exec llama-swap podman info --format '{{.Host.RemoteSocket.Path}}'
+curl -s localhost:8080/v1/models | head -c 200
+```
+
+Roll back by pointing the tag back at `:latest` (still the old base-wrapped
+image until this merges).
+
+**What to watch while testing:** the healthcheck goes `healthy` within its
+start period and stays there while models swap; `podman` inside the container
+still reaches your socket; nothing in your config needed to change. If you
+move the listen port off 8080, set `HEALTHCHECK_URL` accordingly.
 
 ## Pinned by checksum, not by tag
 
