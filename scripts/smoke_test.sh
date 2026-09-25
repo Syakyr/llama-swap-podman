@@ -54,9 +54,11 @@ fi
 pass "podman-remote client runs"
 
 # 3. config validation -----------------------------------------------------
+# NB: overriding --entrypoint also drops the image's default CMD, so -config
+# must be passed explicitly here or llama-swap has no config to validate.
 printf 'models: {}\n' >"$WORK/config.yaml"
 out="$("$DOCKER" run --rm --entrypoint /app/llama-swap \
-    -v "$WORK/config.yaml:/app/config.yaml:ro" "$IMAGE" -validate 2>&1)"
+    -v "$WORK/config.yaml:/app/config.yaml:ro" "$IMAGE" -config /app/config.yaml -validate 2>&1)"
 echo "$out" | grep -qi "valid" || fail "-validate did not report valid: $out"
 pass "config validates inside the image"
 
