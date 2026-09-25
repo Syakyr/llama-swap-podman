@@ -257,6 +257,43 @@ jobs:
           cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
           cache-to: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }},mode=max
 
+      - name: Publish release notes
+        if: steps.ver.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.pair_tag }}
+          IMAGE: ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.pair_tag }}
+          LS: ${{ steps.ver.outputs.ls_num }}
+          PODMAN: ${{ steps.ver.outputs.podman }}
+          LS_SHA: ${{ steps.ver.outputs.ls_sha256 }}
+          PODMAN_SHA: ${{ steps.ver.outputs.podman_sha256 }}
+        run: |
+          set -euo pipefail
+
+          # Idempotent, and deliberately non-destructive: hand-written notes are
+          # richer than anything generated here, so an existing release is left
+          # exactly as it is rather than overwritten on a re-run.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — leaving it alone"
+            exit 0
+          fi
+
+          # "What moved" is computed against the previously latest release, not
+          # from memory, so the notes answer the real question: did llama-swap
+          # move, or did podman?
+          PREV_TAG="$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name 2>/dev/null || true)"
+          SIZE="$(docker image inspect -f '{{.Size}}' llama-swap-podman:smoke 2>/dev/null || echo 0)"
+
+          uv run scripts/make_release_notes.py \
+            --tag "$TAG" --ls "$LS" --podman "$PODMAN" \
+            --ls-sha256 "$LS_SHA" --podman-sha256 "$PODMAN_SHA" \
+            --image "$IMAGE" --prev-tag "$PREV_TAG" --size-bytes "$SIZE" \
+            --smoke "all passed" > "$RUNNER_TEMP/release-notes.md"
+
+          gh release create "$TAG" --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag
+          echo "published release notes for $TAG" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Push (dev)
         if: steps.ver.outputs.mode == 'dev'
         uses: docker/build-push-action@v6
