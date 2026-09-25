@@ -16,6 +16,7 @@
 #   8. the podman socket probe passes with a live socket mounted
 #   9. the podman socket probe fails when the declared socket is absent
 #  10. the healthcheck finds a non-default listen port on its own
+#  11. redistribution notices (NOTICE + license texts) ship inside the image
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke_test.sh <image> [llama_swap_version] [podman_version]}"
@@ -147,5 +148,19 @@ done
 "$DOCKER" exec "$CID2" /app/healthcheck \
     || fail "healthcheck did not discover the non-default listen port"
 pass "healthcheck discovers a non-default listen port from the server's own cmdline"
+
+# 11. redistribution notices are inside the image -------------------------
+# The image ships unmodified MIT and Apache-2.0 binaries; Apache-2.0 wants
+# recipients to receive the license text, so it must be in the artifact.
+lic_dir="$WORK/lic"
+mkdir -p "$lic_dir"
+lic_cid="$("$DOCKER" create "$IMAGE")"
+"$DOCKER" cp "$lic_cid:/usr/share/licenses/llama-swap-podman/NOTICE" "$lic_dir/NOTICE" >/dev/null
+"$DOCKER" cp "$lic_cid:/usr/share/licenses/llama-swap-podman/licenses" "$lic_dir/licenses" >/dev/null
+"$DOCKER" rm -f "$lic_cid" >/dev/null
+[ -s "$lic_dir/NOTICE" ] || fail "NOTICE missing from the image"
+[ -s "$lic_dir/licenses/llama-swap-MIT.txt" ] || fail "llama-swap MIT text missing from the image"
+[ -s "$lic_dir/licenses/podman-Apache-2.0.txt" ] || fail "podman Apache-2.0 text missing from the image"
+pass "redistribution notices present (NOTICE + 2 license texts)"
 
 echo "all smoke tests passed"

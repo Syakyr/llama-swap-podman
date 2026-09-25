@@ -96,8 +96,19 @@ healthcheck/               static Go liveness probe (unit tested)
 scripts/resolve_release.py resolve upstream versions + published checksums
 scripts/smoke_test.sh      the smoke suite CI runs against the built image
 compose.yml                local run/deploy with the same pins
+licenses/                  vendored upstream license texts
+LICENSE  NOTICE            MIT (this project) + third-party inventory
 docs/                      design, healthcheck, building, releasing
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE). The image ships unmodified upstream binaries
+under MIT (llama-swap) and Apache-2.0 (podman-remote); the `NOTICE` and
+those license texts are copied into the image at
+`/usr/share/licenses/llama-swap-podman/`, so the distributed artifact
+carries its own attribution. Model containers this aggregator spawns are
+separate works under their own licenses. Full inventory: [NOTICE](NOTICE).
 
 ## Related
 
