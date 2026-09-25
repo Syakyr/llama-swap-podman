@@ -22,6 +22,24 @@ explicit checksums.
 a static description of what the thing is; "what changed" belongs on
 `Releases → Draft a new release` and never in the repo's landing page.
 
+### Retrying a pairing whose tag is taken
+
+A `v<NNN>-podman<X.Y.Z>` tag can already be used — by an earlier build
+scheme, or by a release that needs redoing. Append a retry suffix:
+
+```bash
+git tag v258-podman6.1.2-2 && git push origin v258-podman6.1.2-2
+```
+
+The tag itself is the immutable image tag, so `-2` publishes a distinct
+record instead of overwriting the colliding one; the suffix is stripped only
+when reading the podman version, so it still resolves to `6.1.2`. Use the
+smallest unused suffix and move on — plain names resume with the next
+upstream release.
+
+Note that `:v<NNN>` and `:latest` still move to the retried build; the
+suffix only protects the pairing tag itself.
+
 ## The watcher
 
 `watch-llama-swap.yml` runs every 6 hours:
