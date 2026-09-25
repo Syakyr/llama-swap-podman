@@ -112,8 +112,14 @@ jobs:
           TOKEN_JSON="$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE}:pull")"
           TOKEN="$(printf '%s' "$TOKEN_JSON" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          # GHCR returns 404 for an existing manifest if the request does not
+          # advertise a manifest media type, so the Accept header is not
+          # optional here — without it every tag looks unbuilt and the watcher
+          # rebuilds (and overwrites) the same pairing on every tick.
+          ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
           code="$(curl -s -o /dev/null -w '%{http_code}' -I \
             -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: ${ACCEPT}" \
             "https://ghcr.io/v2/${IMAGE}/manifests/${TAG}")"
           if [ "$code" = "200" ]; then
             echo "image_exists=yes" >> "$GITHUB_OUTPUT"
