@@ -9,7 +9,7 @@ services:
     build:
       context: .
       args:
-        LLAMA_SWAP_IMAGE: ${LLAMA_SWAP_IMAGE:-ghcr.io/mostlygeek/llama-swap:v257-cpu-b11151}
+        LLAMA_SWAP_IMAGE: ${LLAMA_SWAP_IMAGE:-ghcr.io/mostlygeek/llama-swap:v258-cpu-b11176}
         PODMAN_VERSION: ${PODMAN_VERSION:-6.1.2}
     image: llama-swap-podman:local
     network_mode: host
