@@ -56,7 +56,61 @@ env:
   SIZE_LIMIT_BYTES: 130000000
 
 jobs:
+  # A docs-only push to main used to cut a fresh :dev image that was
+  # byte-identical to the last one. This job decides whether the push actually
+  # touched anything that goes into the image. Tags, PRs and dispatches always
+  # build — the filter exists only for the branch-push :dev flow, and is kept
+  # out of the tag path on purpose because GitHub's own `paths:` filter is
+  # ambiguous for tag pushes and could silently skip a release.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect image-relevant changes
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          always() { echo "build=true" >> "$GITHUB_OUTPUT"; echo "$1"; exit 0; }
+
+          if [ "$EVENT" != "push" ] || [ "$REF_TYPE" != "branch" ]; then
+            always "not a branch push — building"
+          fi
+          # New branch or unknown base: build rather than guess.
+          if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            always "new branch (no previous commit) — building"
+          fi
+          if ! files="$(git diff --name-only "$BEFORE" "$SHA" 2>/dev/null)"; then
+            always "cannot diff against $BEFORE (force push?) — building"
+          fi
+          if [ -z "$files" ]; then
+            always "no file changes reported — building"
+          fi
+
+          printf 'changed files:\n%s\n' "$files"
+          if printf '%s\n' "$files" | grep -Eq '^(Dockerfile|\.dockerignore|healthcheck/|scripts/|\.github/workflows/build\.yml)'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "image-relevant changes detected — building"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "docs/CI-only changes — skipping the duplicate :dev build" \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "no image-relevant changes — skipping"
+          fi
+
   image:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
