@@ -290,8 +290,13 @@ jobs:
             --image "$IMAGE" --prev-tag "$PREV_TAG" --size-bytes "$SIZE" \
             --smoke "all passed" > "$RUNNER_TEMP/release-notes.md"
 
+          # No --verify-tag here on purpose: the watcher dispatches release mode
+          # without pushing a git tag, so requiring one would fail every
+          # watcher-triggered release. gh creates the tag at the commit CI
+          # actually built, which is the provenance we want; on a tag-push
+          # release the tag already exists and is used as-is.
           gh release create "$TAG" --title "$TAG" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag
+            --notes-file "$RUNNER_TEMP/release-notes.md"
           echo "published release notes for $TAG" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push (dev)
