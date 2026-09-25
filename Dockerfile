@@ -124,8 +124,8 @@ COPY --chmod=0755 --from=healthcheck /healthcheck /app/healthcheck
 # MIT (llama-swap) and Apache-2.0 (podman-remote). Apache-2.0 requires that
 # recipients get the license text, so the NOTICE and vendored license texts
 # travel inside the image rather than living only in the repo.
-COPY --chmod=0644 NOTICE /usr/share/licenses/llama-swap-podman/NOTICE
-COPY --chmod=0644 licenses/ /usr/share/licenses/llama-swap-podman/licenses/
+COPY --chown=0:0 NOTICE /usr/share/licenses/llama-swap-podman/NOTICE
+COPY --chown=0:0 licenses/ /usr/share/licenses/llama-swap-podman/licenses/
 
 # scratch has no /etc/passwd; HOME is set to a writable path because
 # podman-remote resolves config (~/.config/containers) relative to it.
