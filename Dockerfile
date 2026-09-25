@@ -94,10 +94,15 @@ RUN set -eux; \
 
 # ---------------------------------------------------------------------------
 # certs: CA bundle only, so an https:// upstream proxy verifies. debian slim
-# ships ca-certificates; assert it rather than assume it survived a base bump.
+# does NOT ship ca-certificates (measured: the file is absent in trixie-slim),
+# so install it here and assert it before it is copied into the runtime.
 # ---------------------------------------------------------------------------
 FROM debian:trixie-slim AS certs
-RUN test -s /etc/ssl/certs/ca-certificates.crt
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -s /etc/ssl/certs/ca-certificates.crt
 
 # ---------------------------------------------------------------------------
 # runtime
