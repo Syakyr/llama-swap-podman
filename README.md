@@ -97,9 +97,18 @@ It is a static Go probe (`healthcheck/`, unit tested) that checks:
    declares a `unix://` socket. An aggregator that cannot reach the socket
    cannot spawn a model, so a live HTTP port alone is not health.
 
+The probe URL is resolved in this order, so **a custom listen port needs no
+configuration**:
+
+1. `HEALTHCHECK_URL`, if set
+2. the port llama-swap is actually listening on, read from its own command
+   line (`/proc/1/cmdline` — it is PID 1 in this container), so
+   `--listen 0.0.0.0:10301` just works
+3. `http://127.0.0.1:8080/health`, the image default
+
 | env | default | meaning |
 |---|---|---|
-| `HEALTHCHECK_URL` | `http://127.0.0.1:8080/health` | endpoint to probe — **set this if you move the listen port** (`-listen 0.0.0.0:10301` → `HEALTHCHECK_URL=http://127.0.0.1:10301/health`) |
+| `HEALTHCHECK_URL` | *derived* | full endpoint to probe; overrides discovery |
 | `HEALTHCHECK_TIMEOUT` | `3s` | per-probe timeout |
 | `HEALTHCHECK_SKIP_SOCKET` | `false` | skip the socket check |
 
@@ -183,8 +192,9 @@ image until this merges).
 
 **What to watch while testing:** the healthcheck goes `healthy` within its
 start period and stays there while models swap; `podman` inside the container
-still reaches your socket; nothing in your config needed to change. If you
-move the listen port off 8080, set `HEALTHCHECK_URL` accordingly.
+still reaches your socket; nothing in your config needed to change. A
+non-default listen port is discovered automatically — no `HEALTHCHECK_URL`
+needed.
 
 ## Pinned by checksum, not by tag
 

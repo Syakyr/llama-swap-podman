@@ -15,6 +15,7 @@
 #      returns 0 is worse than no probe)
 #   8. the podman socket probe passes with a live socket mounted
 #   9. the podman socket probe fails when the declared socket is absent
+#  10. the healthcheck finds a non-default listen port on its own
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke_test.sh <image> [llama_swap_version] [podman_version]}"
@@ -25,8 +26,10 @@ DOCKER="${DOCKER:-docker}"
 WORK="$(mktemp -d)"
 SOCK_PID=""
 CID=""
+CID2=""
 cleanup() {
     [ -n "$CID" ] && "$DOCKER" rm -f "$CID" >/dev/null 2>&1 || true
+    [ -n "$CID2" ] && "$DOCKER" rm -f "$CID2" >/dev/null 2>&1 || true
     [ -n "$SOCK_PID" ] && kill "$SOCK_PID" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
@@ -125,5 +128,24 @@ if "$DOCKER" run --rm --net "container:$CID" \
     fail "socket probe returned 0 with CONTAINER_HOST set but no socket present"
 fi
 pass "podman socket probe fails when the declared socket is missing"
+
+# 10. healthcheck discovers a non-default listen port -----------------------
+# Regression guard: a probe pinned to :8080 reports a perfectly healthy
+# server as dead the moment the operator moves the port (e.g. `--listen
+# 0.0.0.0:10301`). The probe reads the port off llama-swap's own command
+# line instead, so this must pass with no HEALTHCHECK_URL set.
+CID2="$("$DOCKER" run -d --rm \
+    -v "$WORK/config.yaml:/app/config.yaml:ro" \
+    -p 127.0.0.1:18082:18081 \
+    "$IMAGE" -config /app/config.yaml -listen 0.0.0.0:18081)"
+for _ in $(seq 1 30); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/health || true)"
+    [ "$code" = "200" ] && break
+    sleep 1
+done
+[ "$code" = "200" ] || fail "llama-swap on the non-default port did not come up (last: $code)"
+"$DOCKER" exec "$CID2" /app/healthcheck \
+    || fail "healthcheck did not discover the non-default listen port"
+pass "healthcheck discovers a non-default listen port from the server's own cmdline"
 
 echo "all smoke tests passed"
