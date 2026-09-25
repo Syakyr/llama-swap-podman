@@ -5,6 +5,7 @@
 .gitignore
 .github
 README.md
+docs/
 compose.yml
 scripts/
 *.log
