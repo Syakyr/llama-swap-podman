@@ -2,41 +2,31 @@ name: watch-llama-swap
 
 # Watches BOTH upstreams and auto-tags <llama-swap>-podman<X.Y.Z> as the
 # provenance record, then triggers build.yml:
-#  - llama-swap: newest release drives the base image
+#  - llama-swap: newest release drives the aggregator binary
 #  - podman:     newest *stable* release drives the baked-in remote CLI
 #    (GitHub's releases/latest excludes prereleases, so v7.0.0-rc1 style
 #    tags are never picked up — verified against the podman repo).
 #
-#  3. Upstream repos get renamed. containers/podman moved to
-#     podman-container-tools/podman (repo id 109145553) and the old path
-#     now answers 301, which the old non-following curl treated as a hard
-#     failure. PODMAN_UPSTREAM points at the current full name AND every
-#     API lookup passes -L so a future rename costs a redirect, not a red
-#     run. Verified: curl keeps the Authorization header across the
-#     api.github.com -> api.github.com redirect (final response still
-#     reports x-ratelimit-limit: 5000, i.e. still authenticated).
+# The image is no longer built on a llama-swap base image, so "resolve the
+# base" means "resolve the release assets and their published checksums"
+# (scripts/resolve_release.py). Both checksums are passed into the dispatch,
+# so the pair recorded here is byte-for-byte the pair that gets built even if
+# upstream republishes in between.
 #
-# Because the podman version is part of the tag, a podman bump alone (with
-# llama-swap unchanged) produces a new tag and a rebuild on the next tick;
-# an unchanged pair is skipped via the GHCR probe below.
+# A tag pushed with GITHUB_TOKEN does NOT trigger other workflows, so the
+# watcher dispatches build.yml explicitly (workflow_dispatch) instead of
+# relying on its own tag push.
 #
-# Carried-over lessons from halogen-timings-sidecar's watch workflow:
-#  1. Call api.github.com AUTHENTICATED (GITHUB_TOKEN). Anonymous calls from
-#     GitHub-hosted runners share one tiny quota and routinely 403.
-#  2. A tag pushed with GITHUB_TOKEN does NOT trigger build.yml (docs: with
-#     the exception of workflow_dispatch/repository_dispatch, other
-#     GITHUB_TOKEN-triggered events create no runs). So we push the tag for
-#     the record AND call workflow_dispatch explicitly.
+# The watcher also keeps the Dockerfile ARGs and compose.yml defaults in sync
+# with the newest resolved pair so bare local builds never rot. A manual run
+# pinned to an older version deliberately skips that sync.
 #
-# Pin a specific podman version by filling the podman_version input in a
-# manual run, or run build.yml directly.
-#
-# The watcher also keeps the Dockerfile/compose.yml default base pins fresh:
-# after resolving the newest immutable v<NNN>-cpu-b<build> tag it commits a
-# "chore: pin default base" bump to main (skipped when a manual run pinned
-# an older llama_swap_version, so the defaults keep tracking newest-only).
-# A push to main never triggers build.yml (that only fires on tag pushes
-# and PRs), so the chore commit is inert beyond updating the defaults.
+# Failure modes handled:
+#  - Upstream repos get renamed. containers/podman moved to
+#    podman-container-tools/podman; the resolver points at the current
+#    names and fails loudly rather than silently building an old asset.
+#  - A checksum asset disappears or changes format: the resolver exits
+#    non-zero, the watcher reports it, nothing is dispatched.
 
 on:
   schedule:
@@ -51,196 +41,138 @@ on:
         description: "Podman version to bake in (blank = newest stable release)"
         required: false
         default: ""
+      force:
+        description: "Rebuild even if the pairing tag already exists"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
-  contents: write # push the provenance tag
-  actions: write  # POST workflow_dispatch to build.yml
-
-env:
-  UPSTREAM: Mostlygeek/llama-swap
-  PODMAN_UPSTREAM: podman-container-tools/podman  # renamed from containers/podman
+  contents: write
+  actions: write
 
 jobs:
-  tag-new-upstream:
+  watch:
     runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      INPUT_VERSION: ${{ inputs.llama_swap_version }}
-      INPUT_PODMAN: ${{ inputs.podman_version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
 
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: scripts/**
 
-      - name: Resolve upstream versions
+      - name: Resolve upstream versions and checksums
         id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.llama_swap_version }}
+          INPUT_PODMAN: ${{ inputs.podman_version }}
         run: |
           set -euo pipefail
-          VERSION="${INPUT_VERSION:-}"
-          if [ -n "$VERSION" ]; then
-            echo "using manually requested llama-swap version ${VERSION}"
+          ARGS=()
+          [ -n "${INPUT_VERSION:-}" ] && ARGS+=("${INPUT_VERSION}")
+          if [ "${#ARGS[@]}" -gt 0 ]; then
+            LS="$(uv run scripts/resolve_release.py "${ARGS[@]}" --field ls_version)"
           else
-            body="$(mktemp)"
-            code="$(
-              curl -sSL --retry 3 --retry-all-errors \
-                -o "$body" -w '%{http_code}' \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${UPSTREAM}/releases/latest"
-            )"
-            if [ "$code" != "200" ]; then
-              echo "::error::upstream release lookup returned HTTP ${code}"
-              head -c 800 "$body" || true
-              exit 1
-            fi
-            VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$body")"
-            echo "newest upstream llama-swap: ${VERSION}"
+            LS="$(uv run scripts/resolve_release.py --field ls_version)"
           fi
-          VERSION="v${VERSION#v}"
+          echo "newest upstream llama-swap: v${LS}"
 
-          # Newest stable podman release (releases/latest skips prereleases
-          # and drafts). Same authenticated-call rule as above.
-          PODMAN="${INPUT_PODMAN:-}"
-          if [ -n "$PODMAN" ]; then
-            echo "using manually requested podman version ${PODMAN}"
+          if [ -n "${INPUT_PODMAN:-}" ]; then
+            PODMAN="${INPUT_PODMAN#v}"
           else
-            pbody="$(mktemp)"
-            pcode="$(
-              curl -sSL --retry 3 --retry-all-errors \
-                -o "$pbody" -w '%{http_code}' \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${PODMAN_UPSTREAM}/releases/latest"
-            )"
-            if [ "$pcode" != "200" ]; then
-              echo "::error::podman release lookup returned HTTP ${pcode}"
-              head -c 800 "$pbody" || true
-              exit 1
-            fi
-            PODMAN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$pbody")"
-            PODMAN="${PODMAN#v}"
-            echo "newest stable podman: ${PODMAN}"
+            PODMAN="$(uv run scripts/resolve_release.py "v${LS}" --field podman_version)"
           fi
-          if ! printf '%s' "$PODMAN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::podman version '${PODMAN}' is not X.Y.Z"
-            exit 1
-          fi
+          echo "newest stable podman: ${PODMAN}"
 
-          # Resolve the newest immutable base tag now, and pass it to the
-          # dispatch as base_tag: the base recorded/synced by the watcher is
-          # then exactly the base that gets built, even if upstream ships a
-          # new -b<build> between this tick and the build job.
-          BASE="$(uv run scripts/resolve_base.py "$VERSION")"
-          echo "resolved base: ${BASE}"
+          LS_SHA="$(uv run scripts/resolve_release.py "v${LS}" "${PODMAN}" --field ls_sha256)"
+          PODMAN_SHA="$(uv run scripts/resolve_release.py "v${LS}" "${PODMAN}" --field podman_sha256)"
+          echo "llama-swap sha256: ${LS_SHA}"
+          echo "podman sha256:     ${PODMAN_SHA}"
 
           {
-            echo "version=${VERSION}"
+            echo "version=v${LS}"
+            echo "version_num=${LS}"
             echo "podman=${PODMAN}"
-            echo "base=${BASE}"
-            echo "tag=${VERSION}-podman${PODMAN}"
+            echo "ls_sha256=${LS_SHA}"
+            echo "podman_sha256=${PODMAN_SHA}"
+            echo "tag=v${LS}-podman${PODMAN}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Check tag and image state
+      - name: Check if this pairing is already built
         id: state
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.ver.outputs.tag }}"
-
-          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
-            tag_exists=yes
-          else
-            tag_exists=no
-          fi
-
-          # A git tag is not proof of a build. Probe GHCR for the exact
-          # immutable tag so a version that was tagged but never built (or
-          # whose build failed) gets rebuilt on the next tick instead of
-          # being silently skipped forever. Anonymous pull token suffices.
           IMAGE="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
-          PULL_TOKEN="$(
-            curl -sS --retry 3 --retry-all-errors \
-              "https://ghcr.io/token?scope=repository:${IMAGE}:pull" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))'
-          )"
-          if [ -z "$PULL_TOKEN" ]; then
-            echo "::error::could not obtain an anonymous GHCR pull token"
-            exit 1
+          TOKEN_JSON="$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE}:pull")"
+          TOKEN="$(printf '%s' "$TOKEN_JSON" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -I \
+            -H "Authorization: Bearer ${TOKEN}" \
+            "https://ghcr.io/v2/${IMAGE}/manifests/${TAG}")"
+          if [ "$code" = "200" ]; then
+            echo "image_exists=yes" >> "$GITHUB_OUTPUT"
+            echo "${TAG} already exists in GHCR"
+          else
+            echo "image_exists=no" >> "$GITHUB_OUTPUT"
+            echo "${TAG} not built yet (HTTP ${code})"
           fi
-          code="$(
-            curl -sS --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${PULL_TOKEN}" \
-              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-              "https://ghcr.io/v2/${IMAGE}/manifests/${TAG}"
-          )"
-          case "$code" in
-            200) image_exists=yes ;;
-            404) image_exists=no ;;
-            *)
-              echo "::error::GHCR manifest probe returned HTTP ${code}; refusing to guess"
-              exit 1
-              ;;
-          esac
-          echo "tag_exists=${tag_exists}" >> "$GITHUB_OUTPUT"
-          echo "image_exists=${image_exists}" >> "$GITHUB_OUTPUT"
-          echo "${TAG}: git tag=${tag_exists}, ghcr image=${image_exists}"
 
-      - name: Push provenance tag
-        if: steps.state.outputs.tag_exists == 'no'
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.ver.outputs.tag }}"
-          git tag "$TAG"
-          git push origin "$TAG"
-          echo "pushed ${TAG}"
-
-      # Skip only when a scheduled run finds the tag AND its image already
-      # published. A manual run always rebuilds: asking for it is the intent.
-      - name: Trigger build.yml
+      - name: Trigger build
         if: >
-          github.event_name != 'schedule' ||
+          inputs.force == true ||
           steps.state.outputs.image_exists == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PODMAN: ${{ steps.ver.outputs.podman }}
+          LS_SHA: ${{ steps.ver.outputs.ls_sha256 }}
+          PODMAN_SHA: ${{ steps.ver.outputs.podman_sha256 }}
         run: |
           set -euo pipefail
-          body="$(mktemp)"
-          code="$(
-            curl -sS --retry 3 --retry-all-errors \
-              -o "$body" -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-              -d "{\"ref\":\"${{ github.ref }}\",\"inputs\":{\"llama_swap_version\":\"${{ steps.ver.outputs.version }}\",\"podman_version\":\"${{ steps.ver.outputs.podman }}\",\"base_tag\":\"${{ steps.ver.outputs.base }}\"}}"
-          )"
-          if [ "$code" != "204" ]; then
-            echo "::error::workflow_dispatch returned HTTP ${code}"
-            head -c 800 "$body" || true
-            exit 1
-          fi
-          echo "dispatched build.yml for ${{ steps.ver.outputs.tag }}"
+          echo "Dispatching build.yml for ${VERSION}-podman${PODMAN}"
+          gh workflow run build.yml \
+            --ref "${{ github.ref_name }}" \
+            -f "llama_swap_version=${VERSION}" \
+            -f "podman_version=${PODMAN}" \
+            -f "ls_sha256=${LS_SHA}" \
+            -f "podman_sha256=${PODMAN_SHA}" \
+            -f "mode=release"
 
-      # Keep the Dockerfile ARG / compose default in sync with the newest
-      # resolved base so bare local builds don't rot. Only on newest-only
-      # resolutions: a manual run pinned to an older llama_swap_version
-      # must not drag the defaults backwards.
-      - name: Sync pinned defaults
-        if: env.INPUT_VERSION == ''
+      - name: Sync Dockerfile and compose defaults
+        if: >
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.llama_swap_version == '' && inputs.podman_version == '')
         run: |
           set -euo pipefail
-          BASE="${{ steps.ver.outputs.base }}"
-          sed -i -E "s|(ghcr\.io/mostlygeek/llama-swap:)v[0-9]+-cpu-b[0-9]+|\1${BASE}|g" Dockerfile compose.yml
-          if git diff --quiet; then
-            echo "defaults already at ${BASE}; nothing to sync"
+          LS="${{ steps.ver.outputs.version_num }}"
+          PODMAN="${{ steps.ver.outputs.podman }}"
+          LS_SHA="${{ steps.ver.outputs.ls_sha256 }}"
+          PODMAN_SHA="${{ steps.ver.outputs.podman_sha256 }}"
+
+          sed -i -E "s|^ARG LS_VERSION=.*|ARG LS_VERSION=${LS}|" Dockerfile
+          sed -i -E "s|^ARG LS_SHA256=.*|ARG LS_SHA256=${LS_SHA}|" Dockerfile
+          sed -i -E "s|^ARG PODMAN_VERSION=.*|ARG PODMAN_VERSION=${PODMAN}|" Dockerfile
+          sed -i -E "s|^ARG PODMAN_SHA256=.*|ARG PODMAN_SHA256=${PODMAN_SHA}|" Dockerfile
+          sed -i -E "s|(LS_VERSION: \\\$\{LS_VERSION:-)v[0-9]+|\1${LS}|g" compose.yml
+          sed -i -E "s|(LS_SHA256: \\\$\{LS_SHA256:-)[0-9a-f]+|\1${LS_SHA}|g" compose.yml
+          sed -i -E "s|(PODMAN_VERSION: \\\$\{PODMAN_VERSION:-)[0-9.]+|\1${PODMAN}|g" compose.yml
+          sed -i -E "s|(PODMAN_SHA256: \\\$\{PODMAN_SHA256:-)[0-9a-f]+|\1${PODMAN_SHA}|g" compose.yml
+
+          if git diff --quiet Dockerfile compose.yml; then
+            echo "defaults already current"
           else
             git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -am "chore: pin default base to ${BASE} (${{ steps.ver.outputs.version }})"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-            echo "synced Dockerfile + compose.yml defaults to ${BASE}"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Dockerfile compose.yml
+            git commit -m "chore: pin default upstream pair to v${LS} + podman ${PODMAN}"
+            git push origin "HEAD:${{ github.ref_name }}"
+            echo "synced Dockerfile + compose.yml defaults to ${LS} + podman ${PODMAN}"
           fi
 
       - name: Nothing to do
