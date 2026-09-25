@@ -101,9 +101,16 @@ jobs:
           # must carry both versions as inputs (the watcher always does).
           LS="${IN_LS:-}"
           PODMAN="${IN_PODMAN:-}"
+          PAIR_TAG=""
           if [ "$MODE" = "release" ] && [ "$REF_TYPE" = "tag" ]; then
             LS="${REF_NAME%%-podman*}"
             PODMAN="${REF_NAME##*-podman}"
+            # The tag itself is the immutable record, so a retried release can
+            # carry a trailing -N suffix and still publish a distinct image tag
+            # rather than overwriting the pairing it collides with. The podman
+            # version underneath is still X.Y.Z.
+            PAIR_TAG="$REF_NAME"
+            PODMAN="${PODMAN%%-[0-9]*}"
           fi
 
           LS="v${LS#v}"
@@ -157,11 +164,18 @@ jobs:
           IMAGE="$(echo "$REPO" | tr '[:upper:]' '[:lower:]')"
           SHORT="${SHA:0:7}"
 
+          # A dispatch-driven release has no tag of its own; compose the
+          # canonical pairing name.
+          if [ -z "$PAIR_TAG" ] && [ "$MODE" = "release" ]; then
+            PAIR_TAG="${LS}-podman${PODMAN}"
+          fi
+
           {
             echo "mode=$MODE"
             echo "llama_swap=$LS"
             echo "ls_num=${LS#v}"
             echo "podman=$PODMAN"
+            echo "pair_tag=$PAIR_TAG"
             echo "ls_sha256=$LS_SHA"
             echo "podman_sha256=$PODMAN_SHA"
             echo "is_latest=$IS_LATEST"
@@ -175,6 +189,7 @@ jobs:
             echo "| field | value |"
             echo "|---|---|"
             echo "| mode | \`$MODE\` |"
+            echo "| immutable image tag | \`${PAIR_TAG:-n/a}\` |"
             echo "| llama-swap | \`$LS\` |"
             echo "| llama-swap sha256 | \`$LS_SHA\` |"
             echo "| podman-remote | \`$PODMAN\` |"
@@ -236,7 +251,7 @@ jobs:
             PODMAN_VERSION=${{ steps.ver.outputs.podman }}
             PODMAN_SHA256=${{ steps.ver.outputs.podman_sha256 }}
           tags: |
-            ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}-podman${{ steps.ver.outputs.podman }}
+            ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.pair_tag }}
             ghcr.io/${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.llama_swap }}
             ${{ steps.ver.outputs.is_latest == 'yes' && format('ghcr.io/{0}:latest', steps.ver.outputs.image) || '' }}
           cache-from: type=gha,scope=image-${{ steps.ver.outputs.llama_swap }}
