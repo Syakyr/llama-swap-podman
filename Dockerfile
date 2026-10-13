@@ -35,8 +35,8 @@
 
 ARG LS_VERSION=264
 ARG LS_SHA256=ed3569386f0194401b39732e592b881c72223c8a0a49f6a2e1376f1796e3101d
-ARG PODMAN_VERSION=6.1.3
-ARG PODMAN_SHA256=23ee4f71873810a864389b78ffe0d7536296432bb96d0c2acfbbfc7d50ee9c1b
+ARG PODMAN_VERSION=6.1.4
+ARG PODMAN_SHA256=af1f85c22214088a0a9986b9c82b4c9b5b74eda8ecaa6c8cca82b1a63f339b4a
 
 # ---------------------------------------------------------------------------
 # fetch: download both upstream release assets and verify them before anything
