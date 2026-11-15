@@ -16,7 +16,7 @@ services:
       context: .
       args:
         LS_VERSION: ${LS_VERSION:-258}
-        LS_SHA256: ${LS_SHA256:-3f21b4c13f55ea5576badcd6cc1d114ccdcf74a5d56346d3ac1e777d28e0fdf1}
+        LS_SHA256: ${LS_SHA256:-68ffcd890a89288d544be15436feadf41eed3ed7910193c112fffdf5f96dd22e}
         PODMAN_VERSION: ${PODMAN_VERSION:-6.2.0}
         PODMAN_SHA256: ${PODMAN_SHA256:-a8a9a1896fe0836e2d58105259667a6b8d48440a05b07eff19e96d774b6a35cf}
     image: llama-swap-podman:local

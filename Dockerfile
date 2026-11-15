@@ -33,8 +33,8 @@
 # compose files work unchanged: binary at /app/llama-swap, config expected at
 # /app/config.yaml, working dir /app.
 
-ARG LS_VERSION=272
-ARG LS_SHA256=3f21b4c13f55ea5576badcd6cc1d114ccdcf74a5d56346d3ac1e777d28e0fdf1
+ARG LS_VERSION=273
+ARG LS_SHA256=68ffcd890a89288d544be15436feadf41eed3ed7910193c112fffdf5f96dd22e
 ARG PODMAN_VERSION=6.2.0
 ARG PODMAN_SHA256=a8a9a1896fe0836e2d58105259667a6b8d48440a05b07eff19e96d774b6a35cf
 
